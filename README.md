@@ -1,4 +1,3 @@
-# modemmanager-sms-email
 # [modemmanager-sms-email](https://github.com/hueNET-llc/modemmanager-sms-email)
 [![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/huenet-llc/modemmanager-sms-email/master.yml?branch=master)](https://github.com/hueNET-llc/modemmanager-sms-email/actions/workflows/master.yml)
 [![Docker Image Version (latest by date)](https://img.shields.io/docker/v/rafaelwastaken/modemmanager-sms-email)](https://hub.docker.com/r/rafaelwastaken/modemmanager-sms-email)

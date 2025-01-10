@@ -126,6 +126,8 @@ class SMS:
         self.smtp_username = os.environ.get('SMTP_USERNAME')
         self.smtp_password = os.environ.get('SMTP_PASSWORD')
 
+        log.debug(f'Using SMTP login {self.smtp_username} and {self.smtp_password}')
+
         # Get the SMTP TLS setting and ensure it's a valid boolean
         try:
             self.smtp_tls = bool(os.environ.get('SMTP_TLS', False))
