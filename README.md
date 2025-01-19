@@ -26,7 +26,7 @@ Configuration is done via environment variables. Any values with "N/A" default a
 |  Name  | Description | Type | Default | Example |
 | ------ | ----------- | ---- | ------- | ------- |
 | LOG_LEVEL | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) | str | INFO | INFO |
-| MODEM_ID | Modem ID | int | N/A | 0 |
+| MODEM_ID | Modem ID. Set to -1 to auto-detect the first availabe modem ID | int | N/A | 0 |
 | POLL_INTERVAL | Interval in seconds (>=0) between polling the modem for messages | int | 1 | 5 |
 | DELETE_SMS | Delete SMS messages after emailing them | bool | true | false |
 | IGNORE_EXISTING_SMS | Ignore existing SMS messages from before script start | bool | true | false |

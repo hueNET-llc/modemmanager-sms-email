@@ -252,6 +252,20 @@ class SMS:
         smtp.quit()
 
     def run(self):
+        # Modem auto-detection
+        if self.modem_id == -1:
+            p = Popen(['mmcli', '--list-modems', '--output-json'], stdout=PIPE, stderr=PIPE)
+            out, err = p.communicate()
+            if p.returncode != 0:
+                log.error(f'Failed to auto-detect modem: {err.decode()}')
+                exit(1)
+            modems = json.loads(out)['modem-list']
+            if len(modems) == 0:
+                log.error('Failed to auto-detect modem: No modems found')
+                exit(1)
+            self.modem_id = modems[0]
+            log.info(f'Auto-detected modem: {self.modem_id}')
+
         if self.ignore_existing_sms:
             # Login and fetch the initial SMS inbox list on the first run
             while True:
