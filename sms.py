@@ -180,8 +180,17 @@ class SMS:
         p = Popen(['mmcli', '--modem', f'{self.modem_id}', '--messaging-list-sms', '--output-json'], stdout=PIPE, stderr=PIPE)
         out, err = p.communicate()
         if p.returncode != 0:
-            log.error(f'Failed to fetch SMS list: {err.decode()}')
+            err = err.decode()
+            log.error(f'Failed to fetch SMS list: {err}')
+            # Check if the modem ID changed and we have auto-detection enabled
+            if "couldn't find modem" in err and int(os.environ['MODEM_ID']) == -1:
+                log.warning('Modem no longer exists, re-detecting modem')
+                new_modem_id = self.autodetect_modem()
+                # Check if we were able to auto-detect the new modem ID
+                if new_modem_id is not None:
+                    self.modem_id = new_modem_id
             return []
+
         # Return the inbox list from bottom to top (oldest to newest)
         return json.loads(out)['modem.messaging.sms'][::-1]
     
@@ -251,20 +260,29 @@ class SMS:
         # Close the SMTP session
         smtp.quit()
 
+    def autodetect_modem(self):
+        p = Popen(['mmcli', '--list-modems', '--output-json'], stdout=PIPE, stderr=PIPE)
+        out, err = p.communicate()
+        if p.returncode != 0:
+            log.error(f'Failed to auto-detect modem: {err.decode()}')
+            return None
+
+        modems = json.loads(out)['modem-list']
+        if len(modems) == 0:
+            log.error('Failed to auto-detect modem: No modems found')
+            return None
+        
+        modem_id = modems[0]
+        log.info(f'Auto-detected modem: {modem_id}')
+        return modem_id
+
     def run(self):
         # Modem auto-detection
         if self.modem_id == -1:
-            p = Popen(['mmcli', '--list-modems', '--output-json'], stdout=PIPE, stderr=PIPE)
-            out, err = p.communicate()
-            if p.returncode != 0:
-                log.error(f'Failed to auto-detect modem: {err.decode()}')
+            modem_id = self.autodetect_modem()
+            if modem_id is None:
                 exit(1)
-            modems = json.loads(out)['modem-list']
-            if len(modems) == 0:
-                log.error('Failed to auto-detect modem: No modems found')
-                exit(1)
-            self.modem_id = modems[0]
-            log.info(f'Auto-detected modem: {self.modem_id}')
+            self.modem_id = modem_id
 
         if self.ignore_existing_sms:
             # Login and fetch the initial SMS inbox list on the first run
