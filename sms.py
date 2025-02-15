@@ -6,6 +6,7 @@ import re
 import sys
 
 from datetime import datetime
+from email.mime.text import MIMEText
 from smtplib import SMTP
 from time import sleep
 from subprocess import Popen, PIPE
@@ -218,13 +219,17 @@ class SMS:
         """
         Delete an SMS message from the modem using mmcli
         """
-        # Run mmcli to delete the SMS message
-        p = Popen(['mmcli', '--modem', f'{self.modem_id}', '--messaging-delete-sms', sms_id], stdout=PIPE, stderr=PIPE)
-        out, err = p.communicate()
-        if p.returncode != 0:
-            log.error(f'Failed to delete SMS message {sms_id}: {err.decode()}')
-        else:
-            log.debug(f'Deleted SMS message {sms_id}')
+        # Message fails to delete sometimes, retry 2 times on error
+        # 'GDBus.Error:org.freedesktop.ModemManager1.Error.Core.Failed: Couldn't delete 1 parts from this SMS'
+        for _ in range(3):
+            # Run mmcli to delete the SMS message
+            p = Popen(['mmcli', '--modem', f'{self.modem_id}', '--messaging-delete-sms', sms_id], stdout=PIPE, stderr=PIPE)
+            out, err = p.communicate()
+            if p.returncode != 0:
+                log.error(f'Failed to delete SMS message {sms_id}: {err.decode()}')
+            else:
+                log.debug(f'Deleted SMS message {sms_id}')
+                break
     
     def parse_sms_timestamp(self, timestamp: str) -> datetime:
         """
@@ -250,13 +255,18 @@ class SMS:
         """
         # Create an SMTP client
         smtp = SMTP(host=smtp_host, port=smtp_port)
+        message = MIMEText(body, 'plain', 'utf-8')
+        # Set the Subject, Sender, and Recipient
+        message['Subject'] = subject
+        message['From'] = sender
+        message['To'] = ', '.join(recipient)
         if tls:
             # Start TLS session
             smtp.starttls()
         # Login to the SMTP server
         smtp.login(smtp_username, smtp_password)
         # Send the email
-        smtp.sendmail(sender, recipient, f'From: {sender}\nSubject: {subject}\n\n{body}')
+        smtp.sendmail(sender, recipient, message.as_string())
         # Close the SMTP session
         smtp.quit()
 
