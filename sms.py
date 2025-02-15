@@ -221,11 +221,11 @@ class SMS:
         """
         # Message fails to delete sometimes, retry 2 times on error
         # 'GDBus.Error:org.freedesktop.ModemManager1.Error.Core.Failed: Couldn't delete 1 parts from this SMS'
-        for _ in range(3):
+        for attempt in range(3):
             # Run mmcli to delete the SMS message
             p = Popen(['mmcli', '--modem', f'{self.modem_id}', '--messaging-delete-sms', sms_id], stdout=PIPE, stderr=PIPE)
             out, err = p.communicate()
-            if p.returncode != 0:
+            if p.returncode != 0 and attempt == 2:
                 log.error(f'Failed to delete SMS message {sms_id}: {err.decode()}')
             else:
                 log.debug(f'Deleted SMS message {sms_id}')
