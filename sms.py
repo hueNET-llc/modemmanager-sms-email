@@ -8,10 +8,13 @@ import sys
 from datetime import datetime
 from email.mime.text import MIMEText
 from smtplib import SMTP
+from smtplib import SMTPResponseException
 from time import sleep
 from subprocess import Popen, PIPE
 
 log = logging.getLogger('SMS')
+
+SMS_ID_REGEX = re.compile(r'\/org\/freedesktop\/ModemManager[\d]*\/SMS\/([\d]*)')
 
 class SMS:
     def __init__(self):
@@ -30,6 +33,8 @@ class SMS:
         self._load_env_vars()
         # Load the SMS blacklist
         self._load_blacklist()
+        # Last received SMS (duplicate detection)
+        self.last_sms = None
 
     def _setup_logging(self):
         """
@@ -173,13 +178,13 @@ class SMS:
         except json.decoder.JSONDecodeError:
             log.warning('blacklist.json does not contain valid JSON')
 
-    def fetch_sms_inbox(self) -> list[str]:
+    def fetch_sms_inbox(self) -> list[int]:
         """
         Fetch the SMS list from the modem using mmcli
         """
         # Run mmcli to get the SMS list
         p = Popen(['mmcli', '--modem', f'{self.modem_id}', '--messaging-list-sms', '--output-json'], stdout=PIPE, stderr=PIPE)
-        out, err = p.communicate()
+        output, err = p.communicate()
         if p.returncode != 0:
             err = err.decode()
             log.error(f'Failed to fetch SMS list: {err}')
@@ -191,11 +196,14 @@ class SMS:
                 if new_modem_id is not None:
                     self.modem_id = new_modem_id
             return []
+        
+        sms_inbox = []
+        for sms in json.loads(output)['modem.messaging.sms']:
+            sms_inbox.append(self.parse_sms_id(sms))
 
-        # Return the inbox list from bottom to top (oldest to newest)
-        return json.loads(out)['modem.messaging.sms'][::-1]
+        return sms_inbox
     
-    def fetch_sms_message(self, sms_id: str) -> dict:
+    def fetch_sms_message(self, sms_id: int) -> dict:
         """
         Fetch an SMS message from the modem using mmcli
         """
@@ -215,7 +223,7 @@ class SMS:
             'state': message['properties']['state']
         }
     
-    def delete_sms_message(self, sms_id: str):
+    def delete_sms_message(self, sms_id: int):
         """
         Delete an SMS message from the modem using mmcli
         """
@@ -223,13 +231,33 @@ class SMS:
         # 'GDBus.Error:org.freedesktop.ModemManager1.Error.Core.Failed: Couldn't delete 1 parts from this SMS'
         for attempt in range(3):
             # Run mmcli to delete the SMS message
-            p = Popen(['mmcli', '--modem', f'{self.modem_id}', '--messaging-delete-sms', sms_id], stdout=PIPE, stderr=PIPE)
+            p = Popen(['mmcli', '--modem', f'{self.modem_id}', '--messaging-delete-sms', f'{sms_id}'], stdout=PIPE, stderr=PIPE)
             out, err = p.communicate()
-            if p.returncode != 0 and attempt == 2:
-                log.error(f'Failed to delete SMS message {sms_id}: {err.decode()}')
-            else:
+            # Check if the message was deleted successfully
+            if p.returncode == 0:
                 log.debug(f'Deleted SMS message {sms_id}')
                 break
+            # Check if the message failed to delete after 3 attempts
+            if attempt == 2:
+                log.error(f'Failed to delete SMS message {sms_id}: {err.decode()}')
+
+    def parse_sms_id(self, sms_path: str) -> int:
+        """
+        Parse the SMS ID from a ModemManager dbus path
+
+        Args:
+            sms_path (str): SMS dbus path
+
+        Returns:
+            int: SMS ID
+        """
+        # Extract the SMS ID from the dbus path
+        match = SMS_ID_REGEX.search(sms_path)
+        if match:
+            return int(match.group(1))
+        else:
+            log.error(f'Failed to parse SMS ID from path: {sms_path}')
+            return -1
     
     def parse_sms_timestamp(self, timestamp: str) -> datetime:
         """
@@ -298,19 +326,25 @@ class SMS:
             # Login and fetch the initial SMS inbox list on the first run
             while True:
                 try:
-                    log.info('Fetching initial SMS inbox list...')
+                    log.info('Fetching initial SMS ID...')
                     # Fetch the initial SMS inbox list
-                    initial_sms_inbox = self.fetch_sms_inbox()
+                    initial_sms_list = self.fetch_sms_inbox()
+                    if initial_sms_list:
+                        # Get the newest SMS ID
+                        initial_sms_id = initial_sms_list[0]
+                    else:
+                        # Fake SMS ID since the list is empty
+                        initial_sms_id = -1
                     break
-                except requests.exceptions.ConnectTimeout:
-                    log.warning('Initial login and fetch failed, retrying in 30 seconds')
+                except Exception:
+                    log.warning('Initial SMS ID fetch failed, retrying in 30 seconds')
                     # Wait 30 seconds before retrying
                     sleep(30)
 
-            log.info('Fetched initial SMS inbox list, waiting for new messages')
+            log.info('Fetched initial SMS ID, waiting for new messages')
         else:
-            # Fake empty SMS list since we care about existing messages
-            initial_sms_inbox = []
+            # Fake initial SMS ID since we care about existing messages
+            initial_sms_id = -1
 
         # Loop forever and check for new SMS messages
         while True:
@@ -326,7 +360,7 @@ class SMS:
             log.debug(f'Fetched latest SMS inbox list: {sms_inbox}')
 
             for sms_id in sms_inbox:
-                if self.ignore_existing_sms and sms_id in initial_sms_inbox:
+                if self.ignore_existing_sms and sms_id <= initial_sms_id:
                     # Skip existing SMS messages
                     continue
 
@@ -338,7 +372,7 @@ class SMS:
                     timestamp = self.parse_sms_timestamp(sms['timestamp'])
                 except ValueError:
                     # This shouldn't happen but who knows
-                    log.warning(f'Failed to parse SMS timestamp: {sms["timestamp"]}')
+                    log.warning(f'Failed to parse SMS {sms_id} timestamp: {sms["timestamp"]}')
                     # Use the current time as a fallback
                     timestamp = datetime.now()
                     continue
@@ -350,7 +384,7 @@ class SMS:
                 # Run the SMS content through the blacklist
                 for word in self.blacklist['words']:
                     if word.search(content):
-                        log.warning(f'Received blacklisted SMS: From: {sms["number"]}, Date: {timestamp.ctime()}, Blacklisted Word: {word.pattern}, Message: {content}')
+                        log.warning(f'Received blacklisted SMS {sms_id} From: {sms["number"]}, Date: {timestamp.ctime()}, Blacklisted Word: {word.pattern}, Message: {content}')
                         blacklist = True
                         break
                 # Check if the SMS content is blacklisted
@@ -359,14 +393,12 @@ class SMS:
                     if self.delete_sms:
                         # Delete the SMS message
                         self.delete_sms_message(sms_id)
-                    # Add the SMS to the initial list to ignore it next time
-                    initial_sms_inbox.append(sms_id)
                     continue
 
                 # Run the SMS number through the blacklist
                 for number in self.blacklist['numbers']:
                     if number.search(sms['number']):
-                        log.warning(f'Received blacklisted SMS: From: {sms["number"]}, Date: {timestamp.ctime()}, Blacklisted Number: {number.pattern}, Message: {content}')
+                        log.warning(f'Received blacklisted SMS {sms_id} From: {sms["number"]}, Date: {timestamp.ctime()}, Blacklisted Number: {number.pattern}, Message: {content}')
                         blacklist = True
                         break
                 # Check if the SMS number is blacklisted
@@ -375,8 +407,18 @@ class SMS:
                     if self.delete_sms:
                         # Delete the SMS message
                         self.delete_sms_message(sms_id)
-                    # Add the SMS to the initial list to ignore it next time
-                    initial_sms_inbox.append(sms_id)
+                    continue
+
+                # Check if the SMS is a duplicate
+                if self.last_sms \
+                    and self.last_sms['number'] == sms['number'] \
+                    and self.last_sms['content'] == sms['content'] \
+                    and self.last_sms['timestamp'] == sms['timestamp']:
+                    log.debug(f'Ignoring duplicate SMS {sms_id}')
+                    # Check if we should delete SMS messages
+                    if self.delete_sms:
+                        # Delete the SMS message
+                        self.delete_sms_message(sms_id)
                     continue
 
                 log.info(f'Received SMS {sms_id} From: {sms["number"]}, Date: {timestamp.ctime()}, Message: {content}')
@@ -396,8 +438,8 @@ class SMS:
                             tls=self.smtp_tls
                         )
                         break
-                    except TimeoutError:
-                        log.warning('Failed to send email, SMTP timed out')
+                    except SMTPResponseException as e:
+                        log.error(f'Failed to send email, SMTP error: {e}')
                         # Retry SMTP send after 15 seconds
                         sleep(15)
 
@@ -405,6 +447,13 @@ class SMS:
                 if self.delete_sms:
                     # Delete the SMS message
                     self.delete_sms_message(sms_id)
+
+                # Store the SMS message for duplicate detection
+                self.last_sms = {
+                    'number': sms['number'],
+                    'content': sms['content'],
+                    'timestamp': sms['timestamp']
+                }
 
 sms = SMS()
 sms.run()
